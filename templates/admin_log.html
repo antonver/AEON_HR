@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Лог действий</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: #f7f9fb;
+            margin: 0;
+            padding: 0;
+        }
+        .container {
+            max-width: 900px;
+            margin: 40px auto;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 2px 16px rgba(0,0,0,0.07);
+            padding: 32px 40px 40px 40px;
+        }
+        h1 {
+            color: #2d3a4b;
+            margin-bottom: 24px;
+        }
+        nav {
+            margin-bottom: 24px;
+        }
+        nav a {
+            color: #1976d2;
+            text-decoration: none;
+            margin-right: 18px;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+        nav a:hover {
+            color: #0d47a1;
+        }
+        .export {
+            float: right;
+            margin-top: -40px;
+        }
+        .export a {
+            background: #43a047;
+            color: #fff;
+            border-radius: 5px;
+            padding: 7px 18px;
+            text-decoration: none;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+        .export a:hover {
+            background: #2e7031;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            background: #fafbfc;
+        }
+        th, td {
+            border: 1px solid #e3e6ea;
+            padding: 10px 12px;
+            text-align: left;
+        }
+        th {
+            background: #e3e6ea;
+            color: #2d3a4b;
+            font-weight: 600;
+        }
+        tr:nth-child(even) { background: #f4f6fa; }
+        tr:hover { background: #e3f2fd; }
+        .details {
+            font-family: monospace;
+            font-size: 0.98em;
+            color: #444;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Лог действий</h1>
+    <div class="export">
+        <a href="/admin/export/log">Экспорт в CSV</a>
+    </div>
+    <nav>
+        <a href="/admin">Сессии</a>
+        <a href="/admin/stats">Статистика</a>
+        <a href="/admin/log">Лог</a>
+    </nav>
+    <table>
+        <tr>
+            <th>Время</th>
+            <th>Действие</th>
+            <th>Детали</th>
+        </tr>
+        {% for entry in log %}
+        <tr>
+            <td>{{ entry.time }}</td>
+            <td>{{ entry.action }}</td>
+            <td class="details">{{ entry.details }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+</body>
+</html> 

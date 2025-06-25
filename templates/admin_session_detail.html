@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Детали сессии</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: #f7f9fb;
+            margin: 0;
+            padding: 0;
+        }
+        .container {
+            max-width: 700px;
+            margin: 40px auto;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 2px 16px rgba(0,0,0,0.07);
+            padding: 32px 40px 40px 40px;
+        }
+        h1 {
+            color: #2d3a4b;
+            margin-bottom: 24px;
+        }
+        nav {
+            margin-bottom: 24px;
+        }
+        nav a {
+            color: #1976d2;
+            text-decoration: none;
+            margin-right: 18px;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+        nav a:hover {
+            color: #0d47a1;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            background: #fafbfc;
+        }
+        th, td {
+            border: 1px solid #e3e6ea;
+            padding: 10px 12px;
+            text-align: left;
+        }
+        th {
+            background: #e3e6ea;
+            color: #2d3a4b;
+            font-weight: 600;
+        }
+        tr:nth-child(even) { background: #f4f6fa; }
+        tr:hover { background: #e3f2fd; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Детали сессии</h1>
+    <nav>
+        <a href="/admin">Сессии</a>
+        <a href="/admin/stats">Статистика</a>
+    </nav>
+    <p><b>Token:</b> <span style="font-family: monospace;">{{ token }}</span></p>
+    <p><b>Создана:</b> {{ session.created_at }}</p>
+    <p><b>Завершена:</b> {{ 'Да' if session.completed else 'Нет' }}</p>
+    <h2>Ответы</h2>
+    <table>
+        <tr><th>#</th><th>Вопрос</th><th>Ответ</th></tr>
+        {% for idx, ans in enumerate(session.answers) %}
+        <tr>
+            <td>{{ idx+1 }}</td>
+            <td>{{ ans.question_id if ans.question_id is defined else '' }}</td>
+            <td>{{ ans.answer_id if ans.answer_id is defined else ans }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+</body>
+</html> 

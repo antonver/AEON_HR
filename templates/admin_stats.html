@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Статистика</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: #f7f9fb;
+            margin: 0;
+            padding: 0;
+        }
+        .container {
+            max-width: 500px;
+            margin: 40px auto;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 2px 16px rgba(0,0,0,0.07);
+            padding: 32px 40px 40px 40px;
+        }
+        h1 {
+            color: #2d3a4b;
+            margin-bottom: 24px;
+        }
+        nav {
+            margin-bottom: 24px;
+        }
+        nav a {
+            color: #1976d2;
+            text-decoration: none;
+            margin-right: 18px;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+        nav a:hover {
+            color: #0d47a1;
+        }
+        ul {
+            list-style: none;
+            padding: 0;
+        }
+        li {
+            background: #e3e6ea;
+            margin-bottom: 12px;
+            padding: 14px 18px;
+            border-radius: 6px;
+            color: #2d3a4b;
+            font-size: 1.1em;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Статистика по сессиям</h1>
+    <nav>
+        <a href="/admin">Сессии</a>
+        <a href="/admin/stats">Статистика</a>
+    </nav>
+    <ul>
+        <li>Всего сессий: <b>{{ total }}</b></li>
+        <li>Завершённых: <b>{{ completed }}</b></li>
+        <li>Активных: <b>{{ active }}</b></li>
+    </ul>
+</div>
+</body>
+</html> 
