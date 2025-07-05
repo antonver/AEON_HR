@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, status, Body, Request
 from app.models import Test, Question, Answer
 from app.schemas import SubmitAnswersRequest, SubmitAnswersResponse, GetResultResponse
-from typing import Optional
+from typing import Optional, Dict, List, Any
 import uuid
 import os
 import httpx
@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi.templating import Jinja2Templates
 import csv
 from io import StringIO
+from dataclasses import dataclass, field
 
 router = APIRouter()
 admin_router = APIRouter()
@@ -66,67 +67,184 @@ mock_test_en = Test(
     ]
 )
 
+# Улучшенная структура для отслеживания сессий
+@dataclass
+class SessionState:
+    answers: List[Dict] = field(default_factory=list)
+    aeon_answers: Dict[str, str] = field(default_factory=dict)
+    asked_questions: set = field(default_factory=set)
+    current_question_index: int = 0
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    completed: bool = False
+    question_order: List[str] = field(default_factory=list)  # Порядок заданных вопросов
+    last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
 # AEON Questions Pool - 10 профессиональных вопросов
 AEON_QUESTIONS = [
     {
         "id": "q_1",
         "text": "Расскажите о себе и своем профессиональном опыте. Какие навыки и достижения вы считаете наиболее важными?",
-        "type": "technical"
+        "type": "technical",
+        "keywords": ["навыки", "опыт", "достижения", "профессионал"]
     },
     {
         "id": "q_2", 
         "text": "Опишите свой идеальный рабочий день. Что бы вы делали и как бы себя чувствовали?",
-        "type": "soft"
+        "type": "soft",
+        "keywords": ["мотивация", "идеал", "комфорт", "рабочий день"]
     },
     {
         "id": "q_3",
         "text": "Расскажите о ситуации, когда вам пришлось решать сложную проблему. Как вы подошли к решению?",
-        "type": "technical"
+        "type": "technical",
+        "keywords": ["проблема", "решение", "анализ", "подход"]
     },
     {
         "id": "q_4",
         "text": "Как вы справляетесь со стрессом и давлением на работе? Приведите конкретный пример.",
-        "type": "soft"
+        "type": "soft",
+        "keywords": ["стресс", "давление", "пример", "справляться"]
     },
     {
         "id": "q_5",
         "text": "Расскажите о своем опыте работы в команде. Какую роль вы обычно играете в коллективе?",
-        "type": "soft"
+        "type": "soft",
+        "keywords": ["команда", "роль", "коллектив", "сотрудничество"]
     },
     {
         "id": "q_6",
         "text": "Какие технологии, методы или навыки вы изучили за последний год? Что планируете изучить?",
-        "type": "technical"
+        "type": "technical",
+        "keywords": ["технологии", "обучение", "планы", "развитие"]
     },
     {
         "id": "q_7",
         "text": "Опишите ситуацию, когда вам пришлось адаптироваться к серьезным изменениям. Как вы это делали?",
-        "type": "soft"
+        "type": "soft",
+        "keywords": ["адаптация", "изменения", "гибкость", "приспособление"]
     },
     {
         "id": "q_8",
         "text": "Расскажите о своих карьерных целях. Где вы видите себя через 2-3 года?",
-        "type": "soft"
+        "type": "soft",
+        "keywords": ["карьера", "цели", "планы", "будущее"]
     },
     {
         "id": "q_9",
         "text": "Что мотивирует вас в работе больше всего? Что дает вам энергию для профессионального роста?",
-        "type": "soft"
+        "type": "soft",
+        "keywords": ["мотивация", "энергия", "рост", "драйв"]
     },
     {
         "id": "q_10",
         "text": "Почему вы заинтересованы в работе в нашей компании? Какой вклад вы хотите внести?",
-        "type": "soft"
+        "type": "soft",
+        "keywords": ["интерес", "компания", "вклад", "ценность"]
     }
 ]
 
-# In-memory хранилище сессий (улучшенное)
-sessions = {}
+# Улучшенная система хранения сессий
+sessions: Dict[str, SessionState] = {}
 
 SESSION_TTL = timedelta(hours=1)
 
-def is_token_expired(session):
-    return datetime.now(timezone.utc) > session["created_at"] + SESSION_TTL
+def is_token_expired(session_state: SessionState) -> bool:
+    """Проверка истечения срока действия токена"""
+    return datetime.now(timezone.utc) > session_state.created_at + SESSION_TTL
+
+def update_session_activity(session_state: SessionState):
+    """Обновление времени последней активности"""
+    session_state.last_activity = datetime.now(timezone.utc)
+
+def analyze_answer_quality(answer: str, question_keywords: List[str]) -> Dict[str, Any]:
+    """Анализ качества ответа на основе содержания и ключевых слов"""
+    if not answer or not isinstance(answer, str):
+        return {"score": 0, "details": "Пустой ответ"}
+    
+    answer_lower = answer.lower()
+    
+    # Базовые метрики
+    word_count = len(answer.split())
+    sentence_count = len([s for s in answer.split('.') if s.strip()])
+    
+    # Анализ содержания
+    keyword_matches = sum(1 for keyword in question_keywords if keyword.lower() in answer_lower)
+    keyword_ratio = keyword_matches / len(question_keywords) if question_keywords else 0
+    
+    # Анализ структуры
+    has_examples = any(word in answer_lower for word in ['например', 'пример', 'случай', 'ситуация'])
+    has_specifics = any(word in answer_lower for word in ['конкретно', 'именно', 'определенно'])
+    
+    # Оценка качества (0-100)
+    score = 0
+    
+    # Базовая оценка по длине
+    if word_count >= 50:
+        score += 30
+    elif word_count >= 20:
+        score += 20
+    elif word_count >= 10:
+        score += 10
+    
+    # Бонус за релевантность
+    score += min(30, keyword_ratio * 100)
+    
+    # Бонус за примеры и конкретику
+    if has_examples:
+        score += 15
+    if has_specifics:
+        score += 10
+    
+    # Бонус за структурированность
+    if sentence_count >= 3:
+        score += 10
+    elif sentence_count >= 2:
+        score += 5
+    
+    # Штраф за слишком краткие ответы
+    if word_count < 5:
+        score = min(score, 10)
+    
+    return {
+        "score": min(100, max(0, score)),
+        "word_count": word_count,
+        "sentence_count": sentence_count,
+        "keyword_matches": keyword_matches,
+        "keyword_ratio": keyword_ratio,
+        "has_examples": has_examples,
+        "has_specifics": has_specifics
+    }
+
+def calculate_performance_score(session_state: SessionState) -> int:
+    """Расчет итогового балла на основе качества ответов"""
+    if not session_state.aeon_answers:
+        return 0
+    
+    total_score = 0
+    answered_questions = 0
+    
+    for question_id, answer in session_state.aeon_answers.items():
+        # Найти вопрос для получения ключевых слов
+        question_data = next((q for q in AEON_QUESTIONS if q["id"] == question_id), None)
+        if question_data:
+            keywords = question_data.get("keywords", [])
+            quality = analyze_answer_quality(answer, keywords)
+            total_score += quality["score"]
+            answered_questions += 1
+    
+    if answered_questions == 0:
+        return 0
+    
+    # Средний балл за качество ответов
+    avg_quality = total_score / answered_questions
+    
+    # Бонус за полноту (процент отвеченных вопросов)
+    completion_bonus = (answered_questions / len(AEON_QUESTIONS)) * 20
+    
+    # Итоговый балл
+    final_score = min(100, max(0, avg_quality + completion_bonus))
+    
+    return int(final_score)
 
 AEON_CONTEXT = '''
 Как ChatGPT должен обращаться к вам?
@@ -218,74 +336,80 @@ def autosave_answers(test_id: int, request: SubmitAnswersRequest):
 
 @router.post("/session")
 def create_session():
+    """Создание новой сессии с улучшенным отслеживанием"""
     token = str(uuid.uuid4())
-    sessions[token] = {
-        "answers": [],
-        "aeon_answers": {},  # Новое: ответы AEON
-        "asked_questions": set(),  # Новое: заданные вопросы
-        "current_question_index": 0,  # Новое: индекс текущего вопроса
-        "created_at": datetime.now(timezone.utc),
-        "completed": False
-    }
+    sessions[token] = SessionState()
     log_event("create_session", {"token": token})
     return {"token": token}
 
 @router.post("/session/{token}/answer")
 def save_answer(token: str, answer: dict = Body(...)):
-    session = sessions.get(token)
-    if not session:
+    """Сохранение ответа с валидацией"""
+    session_state = sessions.get(token)
+    if not session_state:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-    if is_token_expired(session):
+    if is_token_expired(session_state):
         raise HTTPException(status_code=403, detail="Срок действия токена истёк")
-    if session["completed"]:
+    if session_state.completed:
         raise HTTPException(status_code=403, detail="Тест уже завершён")
     
-    # Сохраняем обычный ответ
-    session["answers"].append(answer)
+    # Обновляем активность
+    update_session_activity(session_state)
     
-    # Если это AEON ответ, сохраняем отдельно
+    # Сохраняем обычный ответ
+    session_state.answers.append(answer)
+    
+    # Если это AEON ответ, сохраняем отдельно с валидацией
     if "question_id" in answer:
-        session["aeon_answers"][answer["question_id"]] = answer["answer"]
+        question_id = answer["question_id"]
+        # Проверяем, что этот вопрос действительно был задан
+        if question_id in session_state.asked_questions:
+            session_state.aeon_answers[question_id] = answer.get("answer", "")
+        else:
+            log_event("invalid_answer", {"token": token, "question_id": question_id, "error": "Question not asked"})
+            raise HTTPException(status_code=400, detail="Вопрос не был задан")
     
     log_event("save_answer", {"token": token, "answer": answer})
     return {"status": "saved"}
 
 @router.get("/session/{token}")
 def get_session(token: str):
-    session = sessions.get(token)
-    if not session:
+    """Получение состояния сессии"""
+    session_state = sessions.get(token)
+    if not session_state:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-    if is_token_expired(session):
+    if is_token_expired(session_state):
         raise HTTPException(status_code=403, detail="Срок действия токена истёк")
     
-    # Возвращаем безопасную копию без внутренних данных
     return {
         "token": token,
-        "created_at": session["created_at"],
-        "completed": session["completed"],
-        "questions_answered": len(session["aeon_answers"]),
-        "total_questions": len(AEON_QUESTIONS)
+        "created_at": session_state.created_at,
+        "completed": session_state.completed,
+        "questions_answered": len(session_state.aeon_answers),
+        "total_questions": len(AEON_QUESTIONS),
+        "asked_questions": len(session_state.asked_questions),
+        "current_performance": calculate_performance_score(session_state)
     }
 
 @router.post("/session/{token}/complete")
 def complete_session(token: str):
-    session = sessions.get(token)
-    if not session:
+    session_state = sessions.get(token)
+    if not session_state:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-    if is_token_expired(session):
+    if is_token_expired(session_state):
         raise HTTPException(status_code=403, detail="Срок действия токена истёк")
-    session["completed"] = True
+    session_state.completed = True
     log_event("complete_session", {"token": token})
     return {"status": "completed"}
 
 @router.get("/result/{token}")
 def get_result_by_token(token: str):
-    session = sessions.get(token)
-    if not session:
+    session_state = sessions.get(token)
+    if not session_state:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
     
-    total_time = (datetime.now(timezone.utc) - session["created_at"]).total_seconds()
-    questions_answered = len(session["aeon_answers"])
+    total_time = (datetime.now(timezone.utc) - session_state.created_at).total_seconds()
+    questions_answered = len(session_state.aeon_answers)
     completion_rate = (questions_answered / len(AEON_QUESTIONS)) * 100 if len(AEON_QUESTIONS) > 0 else 0
     
     return {
@@ -295,14 +419,14 @@ def get_result_by_token(token: str):
         "completion_rate": completion_rate,
         "average_time_per_question": int(total_time / questions_answered) if questions_answered > 0 else 0,
         "performance_score": min(85, max(40, 60 + (questions_answered * 3))),  # Простая формула
-        "created_at": session["created_at"].isoformat(),
+        "created_at": session_state.created_at.isoformat(),
         "completed_at": datetime.now(timezone.utc).isoformat()
     }
 
 @router.get("/stats")
 def get_stats():
     num_sessions = len(sessions)
-    num_answers = sum(len(s["aeon_answers"]) for s in sessions.values())
+    num_answers = sum(len(s.aeon_answers) for s in sessions.values())
     # Средний балл — если бы мы считали результаты (заглушка)
     avg_score = 50 if num_sessions > 0 else 0
     return {
@@ -315,122 +439,109 @@ def get_stats():
 
 @router.post("/aeon/question/{token}")
 async def aeon_next_question_with_token(token: str, data: dict = Body(...)):
-    """Получить следующий вопрос AEON для конкретной сессии"""
-    session = sessions.get(token)
-    if not session:
+    """ИСПРАВЛЕННАЯ логика получения следующего вопроса AEON"""
+    session_state = sessions.get(token)
+    if not session_state:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-    if is_token_expired(session):
+    if is_token_expired(session_state):
         raise HTTPException(status_code=403, detail="Срок действия токена истёк")
     
-    # Проверяем, сколько вопросов уже задано
-    if session["current_question_index"] >= len(AEON_QUESTIONS):
+    # Обновляем активность
+    update_session_activity(session_state)
+    
+    # Ищем первый незаданный вопрос
+    available_questions = [q for q in AEON_QUESTIONS if q["id"] not in session_state.asked_questions]
+    
+    if not available_questions:
         return JSONResponse(content={"detail": "Все вопросы заданы"}, status_code=404)
     
-    # Получаем следующий вопрос
-    question = AEON_QUESTIONS[session["current_question_index"]]
+    # Берем первый доступный вопрос
+    question = available_questions[0]
     
-    # Проверяем, не задавали ли уже этот вопрос
-    if question["id"] in session["asked_questions"]:
-        # Ищем следующий незаданный вопрос
-        for i in range(session["current_question_index"], len(AEON_QUESTIONS)):
-            if AEON_QUESTIONS[i]["id"] not in session["asked_questions"]:
-                question = AEON_QUESTIONS[i]
-                session["current_question_index"] = i
-                break
-        else:
-            return JSONResponse(content={"detail": "Все вопросы заданы"}, status_code=404)
-    
-    # Добавляем вопрос в список заданных
-    session["asked_questions"].add(question["id"])
+    # ИСПРАВЛЕНИЕ: Добавляем вопрос в список заданных ТОЛЬКО после успешной отправки
+    session_state.asked_questions.add(question["id"])
+    session_state.question_order.append(question["id"])
     
     log_event("aeon_question", {"token": token, "question_id": question["id"]})
     
     return {
         "question": question["text"],
         "type": question["type"],
-        "question_id": question["id"]
+        "question_id": question["id"],
+        "question_number": len(session_state.asked_questions),
+        "total_questions": len(AEON_QUESTIONS)
     }
 
 @router.post("/aeon/glyph/{token}")
 async def generate_glyph_with_token(token: str, data: dict = Body(...)):
-    """Сгенерировать глиф для конкретной сессии"""
-    session = sessions.get(token)
-    if not session:
+    """УЛУЧШЕННАЯ генерация глифа с анализом качества ответов"""
+    session_state = sessions.get(token)
+    if not session_state:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-    if is_token_expired(session):
+    if is_token_expired(session_state):
         raise HTTPException(status_code=403, detail="Срок действия токена истёк")
     
-    answers = session["aeon_answers"]
+    answers = session_state.aeon_answers
     log_event("generate_glyph", {"token": token, "answers_count": len(answers)})
     
-    # Анализируем качество ответов
-    answer_values = list(answers.values())
-    if not answer_values:
+    if not answers:
         return {
-            "glyph": "🚀 Стартер-Энтузиаст",
-            "profile": "Кандидат только начинает своё интервью. Пока недостаточно данных для полного анализа."
+            "glyph": "🚀 Стартер-Потенциал",
+            "profile": "Кандидат только начинает интервью. Пока недостаточно данных для полного анализа."
         }
     
-    avg_length = sum(len(str(answer)) for answer in answer_values) / len(answer_values)
-    detailed_answers = sum(1 for answer in answer_values if len(str(answer)) > 50)
-    detailed_percentage = (detailed_answers / len(answer_values)) * 100
+    # Анализируем качество ответов
+    total_quality_score = 0
+    quality_details = []
     
-    # Определяем профиль на основе качества ответов
-    if detailed_percentage >= 70:
-        glyph = "🎯 Лидер-Аналитик"
-        profile = f"Кандидат продемонстрировал исключительную глубину мышления и аналитические способности. Средняя длина ответов: {int(avg_length)} символов. Показывает высокий уровень самрефлексии, стратегического мышления и готовности к лидерству. Отлично структурирует мысли и может детально объяснить свои решения."
-    elif detailed_percentage >= 50:
-        glyph = "⚡ Потенциал-Рост"
-        profile = f"Кандидат показал хорошие коммуникативные навыки и потенциал для развития. Средняя длина ответов: {int(avg_length)} символов. Демонстрирует готовность к обучению, адаптивность и базовые профессиональные компетенции. Может эффективно работать в команде и брать на себя ответственность."
+    for question_id, answer in answers.items():
+        question_data = next((q for q in AEON_QUESTIONS if q["id"] == question_id), None)
+        if question_data:
+            keywords = question_data.get("keywords", [])
+            quality = analyze_answer_quality(answer, keywords)
+            total_quality_score += quality["score"]
+            quality_details.append(quality)
+    
+    avg_quality = total_quality_score / len(answers) if answers else 0
+    completion_rate = (len(answers) / len(AEON_QUESTIONS)) * 100
+    
+    # Анализируем типы ответов
+    technical_count = sum(1 for q_id in answers.keys() 
+                         if any(q["id"] == q_id and q["type"] == "technical" for q in AEON_QUESTIONS))
+    soft_count = len(answers) - technical_count
+    
+    # Определяем профиль на основе комплексного анализа
+    if avg_quality >= 80:
+        glyph = "🎯 Мастер-Лидер"
+        profile = f"Исключительный кандидат с выдающимися навыками. Средний качественный балл: {avg_quality:.1f}/100. Демонстрирует глубокое понимание вопросов, структурированное мышление и высокий уровень профессиональной зрелости. Готов к лидерским позициям и сложным задачам."
+    elif avg_quality >= 65:
+        glyph = "⚡ Эксперт-Драйвер"
+        profile = f"Сильный кандидат с хорошими профессиональными навыками. Средний качественный балл: {avg_quality:.1f}/100. Показывает способность к аналитическому мышлению, может эффективно решать сложные задачи и работать в команде."
+    elif avg_quality >= 50:
+        glyph = "🌟 Потенциал-Рост"
+        profile = f"Перспективный кандидат с хорошим потенциалом. Средний качественный балл: {avg_quality:.1f}/100. Демонстрирует базовые профессиональные навыки и мотивацию к развитию. Подходит для позиций с возможностью роста."
     else:
         glyph = "🚀 Стартер-Энтузиаст"
-        profile = f"Кандидат показал энтузиазм и базовые навыки. Средняя длина ответов: {int(avg_length)} символов. Демонстрирует мотивацию к работе и готовность к профессиональному росту. Подходит для позиций начального уровня с хорошими перспективами развития."
+        profile = f"Кандидат на начальном этапе развития. Средний качественный балл: {avg_quality:.1f}/100. Показывает энтузиазм и готовность к обучению. Рекомендуется для junior позиций с менторской поддержкой."
     
-    # Попытаемся использовать OpenAI для улучшения профиля
-    try:
-        if OPENAI_API_KEY and not OPENAI_API_KEY.startswith("sk-proj-X1"):  # Проверяем что это не тестовый ключ
-            results = [{"question": q_id, "answer": answer} for q_id, answer in answers.items()]
-            user_prompt = "Вот результаты теста кандидата:\n" + "\n".join([f"{r['question']}: {r['answer']}" for r in results]) + "\nСгенерируй глиф и поведенческий профиль. Ответ верни в формате JSON: {\"glyph\": ..., \"profile\": ...}"
-            
-            payload = {
-                "model": "gpt-3.5-turbo",
-                "messages": [
-                    {"role": "system", "content": AEON_CONTEXT},
-                    {"role": "user", "content": user_prompt}
-                ],
-                "max_tokens": 500,
-                "temperature": 0.7
-            }
-            headers = {
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
-                if response.status_code == 200:
-                    content = response.json()["choices"][0]["message"]["content"]
-                    try:
-                        import json as pyjson
-                        ai_result = pyjson.loads(content)
-                        return ai_result
-                    except:
-                        pass  # Падаем на fallback
-    except:
-        pass  # Используем fallback
+    # Добавляем детали анализа
+    profile += f"\n\n📊 Детали анализа:\n"
+    profile += f"• Завершенность: {completion_rate:.1f}% ({len(answers)}/{len(AEON_QUESTIONS)})\n"
+    profile += f"• Технические вопросы: {technical_count}, Soft skills: {soft_count}\n"
+    profile += f"• Среднее качество ответов: {avg_quality:.1f}/100"
     
     return {"glyph": glyph, "profile": profile}
 
 @router.post("/aeon/summary/{token}")
 async def aeon_summary_with_token(token: str):
-    """Сгенерировать сводку для конкретной сессии"""
-    session = sessions.get(token)
-    if not session:
+    """УЛУЧШЕННАЯ генерация сводки с детальным анализом"""
+    session_state = sessions.get(token)
+    if not session_state:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-    if is_token_expired(session):
+    if is_token_expired(session_state):
         raise HTTPException(status_code=403, detail="Срок действия токена истёк")
     
-    answers = session["aeon_answers"]
+    answers = session_state.aeon_answers
     total_answers = len(answers)
     
     if total_answers == 0:
@@ -438,47 +549,77 @@ async def aeon_summary_with_token(token: str):
             "summary": "📊 **Анализ интервью начат**\n\nИнтервью только началось. Пожалуйста, ответьте на вопросы для получения детального анализа."
         }
     
-    # Анализируем ответы
-    answer_values = list(answers.values())
-    avg_length = sum(len(str(answer)) for answer in answer_values) / len(answer_values)
-    detailed_answers = sum(1 for answer in answer_values if len(str(answer)) > 50)
-    short_answers = sum(1 for answer in answer_values if len(str(answer)) < 20)
+    # Детальный анализ ответов
+    quality_scores = []
+    keyword_matches = []
+    has_examples_count = 0
     
-    # Вычисляем время сессии
-    total_time = (datetime.now(timezone.utc) - session["created_at"]).total_seconds() / 60  # в минутах
+    for question_id, answer in answers.items():
+        question_data = next((q for q in AEON_QUESTIONS if q["id"] == question_id), None)
+        if question_data:
+            keywords = question_data.get("keywords", [])
+            quality = analyze_answer_quality(answer, keywords)
+            quality_scores.append(quality["score"])
+            keyword_matches.append(quality["keyword_matches"])
+            if quality["has_examples"]:
+                has_examples_count += 1
     
-    summary = f"""📊 **Анализ интервью завершен**
+    # Расчет метрик
+    avg_quality = sum(quality_scores) / len(quality_scores) if quality_scores else 0
+    performance_score = calculate_performance_score(session_state)
+    total_time = (datetime.now(timezone.utc) - session_state.created_at).total_seconds() / 60
+    
+    # Определение уровня качества
+    if avg_quality >= 80:
+        quality_level = "🏆 Превосходное"
+        recommendation = "Настоятельно рекомендуется к найму"
+    elif avg_quality >= 65:
+        quality_level = "✅ Отличное"
+        recommendation = "Рекомендуется к найму"
+    elif avg_quality >= 50:
+        quality_level = "👍 Хорошее"
+        recommendation = "Подходит для рассмотрения"
+    else:
+        quality_level = "⚠️ Базовое"
+        recommendation = "Требует дополнительного интервью"
+    
+    summary = f"""📊 **Подробный анализ интервью**
 
-**Статистика интервью:**
-• Отвечено на {total_answers} из {len(AEON_QUESTIONS)} вопросов
-• Средняя длина ответа: {int(avg_length)} символов
-• Детальных ответов: {detailed_answers} ({int((detailed_answers / total_answers) * 100)}%)
-• Кратких ответов: {short_answers} ({int((short_answers / total_answers) * 100)}%)
-• Общее время: {int(total_time)} минут
+**Общая статистика:**
+• Отвечено на {total_answers} из {len(AEON_QUESTIONS)} вопросов ({(total_answers/len(AEON_QUESTIONS)*100):.1f}%)
+• Общее время интервью: {int(total_time)} минут
+• Итоговый балл: {performance_score}/100
 
 **Анализ качества ответов:**
-{
-    '✅ Отличное качество - кандидат предоставил подробные, thoughtful ответы на большинство вопросов' if detailed_answers >= 7 else
-    '✅ Хорошее качество - кандидат дал содержательные ответы на половину вопросов' if detailed_answers >= 5 else
-    '⚠️ Базовое качество - ответы краткие, рекомендуется более детальное собеседование'
-}
+• Уровень качества: {quality_level}
+• Средний балл качества: {avg_quality:.1f}/100
+• Ответы с примерами: {has_examples_count}/{total_answers}
+• Релевантность содержания: {(sum(keyword_matches)/len(keyword_matches)/4*100):.1f}% (в среднем)
 
-**Рекомендации:**
-• Кандидат готов к следующему этапу интервью
-• Рекомендуется техническое интервью для проверки hard skills
-• Показал {'высокий' if avg_length > 100 else 'средний' if avg_length > 50 else 'базовый'} уровень коммуникативных навыков"""
+**Профессиональная оценка:**
+{recommendation}
 
-    log_event("aeon_summary", {"token": token, "answers_count": total_answers})
+**Рекомендации для следующих этапов:**
+• {'Техническое интервью с сложными задачами' if avg_quality >= 70 else 'Техническое интервью базового уровня'}
+• {'Готов к самостоятельной работе' if performance_score >= 70 else 'Рекомендуется менторская поддержка'}
+• {'Может претендовать на лидерские позиции' if avg_quality >= 80 else 'Подходит для командных позиций'}
+
+**Сильные стороны:**
+{f'• Высокое качество ответов и аналитическое мышление' if avg_quality >= 70 else ''}
+{f'• Способность приводить конкретные примеры' if has_examples_count >= total_answers/2 else ''}
+{f'• Хорошая скорость реакции' if total_time <= 30 else ''}"""
+
+    log_event("aeon_summary", {"token": token, "answers_count": total_answers, "performance_score": performance_score})
     
     return {"summary": summary}
 
 @router.post("/aeon/task/{token}")
 async def aeon_task_with_token(token: str, data: dict = Body(...)):
     """Сгенерировать задание для конкретной сессии"""
-    session = sessions.get(token)
-    if not session:
+    session_state = sessions.get(token)
+    if not session_state:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-    if is_token_expired(session):
+    if is_token_expired(session_state):
         raise HTTPException(status_code=403, detail="Срок действия токена истёк")
     
     candidate = data.get("candidate", "Кандидат")
@@ -600,10 +741,10 @@ def admin_sessions(request: Request):
     session_list = [
         {
             "token": token, 
-            "created_at": s["created_at"], 
-            "completed": s["completed"], 
-            "answers": len(s["aeon_answers"]),
-            "total_answers": len(s["answers"])
+            "created_at": s.created_at, 
+            "completed": s.completed, 
+            "answers": len(s.aeon_answers),
+            "total_answers": len(s.answers)
         }
         for token, s in sessions.items()
     ]
@@ -611,10 +752,10 @@ def admin_sessions(request: Request):
 
 @admin_router.get("/admin/session/{token}", response_class=HTMLResponse)
 def admin_session_detail(request: Request, token: str):
-    session = sessions.get(token)
-    if not session:
+    session_state = sessions.get(token)
+    if not session_state:
         return HTMLResponse("<h2>Сессия не найдена</h2>", status_code=404)
-    return templates.TemplateResponse("admin_session_detail.html", {"request": request, "token": token, "session": session})
+    return templates.TemplateResponse("admin_session_detail.html", {"request": request, "token": token, "session": session_state})
 
 @admin_router.post("/admin/session/{token}/delete")
 def admin_delete_session(request: Request, token: str):
@@ -626,9 +767,9 @@ def admin_delete_session(request: Request, token: str):
 @admin_router.get("/admin/stats", response_class=HTMLResponse)
 def admin_stats(request: Request):
     total = len(sessions)
-    completed = sum(1 for s in sessions.values() if s["completed"])
+    completed = sum(1 for s in sessions.values() if s.completed)
     active = total - completed
-    total_aeon_answers = sum(len(s["aeon_answers"]) for s in sessions.values())
+    total_aeon_answers = sum(len(s.aeon_answers) for s in sessions.values())
     return templates.TemplateResponse("admin_stats.html", {
         "request": request, 
         "total": total, 
@@ -648,7 +789,7 @@ def export_sessions():
         writer = csv.writer(output)
         writer.writerow(["token", "created_at", "completed", "answers", "aeon_answers"])
         for token, s in sessions.items():
-            writer.writerow([token, s["created_at"], s["completed"], len(s["answers"]), len(s["aeon_answers"])])
+            writer.writerow([token, s.created_at, s.completed, len(s.answers), len(s.aeon_answers)])
         yield output.getvalue()
     return StreamingResponse(generate(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=sessions.csv"})
 
