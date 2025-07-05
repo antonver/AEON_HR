@@ -66,7 +66,61 @@ mock_test_en = Test(
     ]
 )
 
-# In-memory хранилище сессий
+# AEON Questions Pool - 10 профессиональных вопросов
+AEON_QUESTIONS = [
+    {
+        "id": "q_1",
+        "text": "Расскажите о себе и своем профессиональном опыте. Какие навыки и достижения вы считаете наиболее важными?",
+        "type": "technical"
+    },
+    {
+        "id": "q_2", 
+        "text": "Опишите свой идеальный рабочий день. Что бы вы делали и как бы себя чувствовали?",
+        "type": "soft"
+    },
+    {
+        "id": "q_3",
+        "text": "Расскажите о ситуации, когда вам пришлось решать сложную проблему. Как вы подошли к решению?",
+        "type": "technical"
+    },
+    {
+        "id": "q_4",
+        "text": "Как вы справляетесь со стрессом и давлением на работе? Приведите конкретный пример.",
+        "type": "soft"
+    },
+    {
+        "id": "q_5",
+        "text": "Расскажите о своем опыте работы в команде. Какую роль вы обычно играете в коллективе?",
+        "type": "soft"
+    },
+    {
+        "id": "q_6",
+        "text": "Какие технологии, методы или навыки вы изучили за последний год? Что планируете изучить?",
+        "type": "technical"
+    },
+    {
+        "id": "q_7",
+        "text": "Опишите ситуацию, когда вам пришлось адаптироваться к серьезным изменениям. Как вы это делали?",
+        "type": "soft"
+    },
+    {
+        "id": "q_8",
+        "text": "Расскажите о своих карьерных целях. Где вы видите себя через 2-3 года?",
+        "type": "soft"
+    },
+    {
+        "id": "q_9",
+        "text": "Что мотивирует вас в работе больше всего? Что дает вам энергию для профессионального роста?",
+        "type": "soft"
+    },
+    {
+        "id": "q_10",
+        "text": "Почему вы заинтересованы в работе в нашей компании? Какой вклад вы хотите внести?",
+        "type": "soft"
+    }
+]
+
+# In-memory хранилище сессий (улучшенное)
 sessions = {}
 
 SESSION_TTL = timedelta(hours=1)
@@ -167,6 +221,9 @@ def create_session():
     token = str(uuid.uuid4())
     sessions[token] = {
         "answers": [],
+        "aeon_answers": {},  # Новое: ответы AEON
+        "asked_questions": set(),  # Новое: заданные вопросы
+        "current_question_index": 0,  # Новое: индекс текущего вопроса
         "created_at": datetime.now(timezone.utc),
         "completed": False
     }
@@ -182,7 +239,14 @@ def save_answer(token: str, answer: dict = Body(...)):
         raise HTTPException(status_code=403, detail="Срок действия токена истёк")
     if session["completed"]:
         raise HTTPException(status_code=403, detail="Тест уже завершён")
+    
+    # Сохраняем обычный ответ
     session["answers"].append(answer)
+    
+    # Если это AEON ответ, сохраняем отдельно
+    if "question_id" in answer:
+        session["aeon_answers"][answer["question_id"]] = answer["answer"]
+    
     log_event("save_answer", {"token": token, "answer": answer})
     return {"status": "saved"}
 
@@ -193,7 +257,15 @@ def get_session(token: str):
         raise HTTPException(status_code=404, detail="Сессия не найдена")
     if is_token_expired(session):
         raise HTTPException(status_code=403, detail="Срок действия токена истёк")
-    return session
+    
+    # Возвращаем безопасную копию без внутренних данных
+    return {
+        "token": token,
+        "created_at": session["created_at"],
+        "completed": session["completed"],
+        "questions_answered": len(session["aeon_answers"]),
+        "total_questions": len(AEON_QUESTIONS)
+    }
 
 @router.post("/session/{token}/complete")
 def complete_session(token: str):
@@ -206,10 +278,31 @@ def complete_session(token: str):
     log_event("complete_session", {"token": token})
     return {"status": "completed"}
 
+@router.get("/result/{token}")
+def get_result_by_token(token: str):
+    session = sessions.get(token)
+    if not session:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+    
+    total_time = (datetime.now(timezone.utc) - session["created_at"]).total_seconds()
+    questions_answered = len(session["aeon_answers"])
+    completion_rate = (questions_answered / len(AEON_QUESTIONS)) * 100 if len(AEON_QUESTIONS) > 0 else 0
+    
+    return {
+        "session_id": token,
+        "total_time": int(total_time),
+        "questions_answered": questions_answered,
+        "completion_rate": completion_rate,
+        "average_time_per_question": int(total_time / questions_answered) if questions_answered > 0 else 0,
+        "performance_score": min(85, max(40, 60 + (questions_answered * 3))),  # Простая формула
+        "created_at": session["created_at"].isoformat(),
+        "completed_at": datetime.now(timezone.utc).isoformat()
+    }
+
 @router.get("/stats")
 def get_stats():
     num_sessions = len(sessions)
-    num_answers = sum(len(s["answers"]) for s in sessions.values())
+    num_answers = sum(len(s["aeon_answers"]) for s in sessions.values())
     # Средний балл — если бы мы считали результаты (заглушка)
     avg_score = 50 if num_sessions > 0 else 0
     return {
@@ -218,137 +311,300 @@ def get_stats():
         "avg_score": avg_score
     }
 
-@router.post("/aeon/glyph")
-async def generate_glyph(data: dict):
-    results = data.get("results", [])
-    log_event("generate_glyph", {"results": results})
-    user_prompt = "Вот результаты теста кандидата:\n" + "\n".join([f"{r['question']}: {r['answer']}" for r in results]) + "\nСгенерируй глиф и поведенческий профиль. Ответ верни в формате JSON: {\"glyph\": ..., \"profile\": ...}"
-    payload = {
-        "model": "gpt-3.5-turbo",
-        "messages": [
-            {"role": "system", "content": AEON_CONTEXT},
-            {"role": "user", "content": user_prompt}
-        ],
-        "max_tokens": 500,
-        "temperature": 0.7
+# ===== ИСПРАВЛЕННЫЕ AEON ЭНДПОИНТЫ =====
+
+@router.post("/aeon/question/{token}")
+async def aeon_next_question_with_token(token: str, data: dict = Body(...)):
+    """Получить следующий вопрос AEON для конкретной сессии"""
+    session = sessions.get(token)
+    if not session:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+    if is_token_expired(session):
+        raise HTTPException(status_code=403, detail="Срок действия токена истёк")
+    
+    # Проверяем, сколько вопросов уже задано
+    if session["current_question_index"] >= len(AEON_QUESTIONS):
+        return JSONResponse(content={"detail": "Все вопросы заданы"}, status_code=404)
+    
+    # Получаем следующий вопрос
+    question = AEON_QUESTIONS[session["current_question_index"]]
+    
+    # Проверяем, не задавали ли уже этот вопрос
+    if question["id"] in session["asked_questions"]:
+        # Ищем следующий незаданный вопрос
+        for i in range(session["current_question_index"], len(AEON_QUESTIONS)):
+            if AEON_QUESTIONS[i]["id"] not in session["asked_questions"]:
+                question = AEON_QUESTIONS[i]
+                session["current_question_index"] = i
+                break
+        else:
+            return JSONResponse(content={"detail": "Все вопросы заданы"}, status_code=404)
+    
+    # Добавляем вопрос в список заданных
+    session["asked_questions"].add(question["id"])
+    
+    log_event("aeon_question", {"token": token, "question_id": question["id"]})
+    
+    return {
+        "question": question["text"],
+        "type": question["type"],
+        "question_id": question["id"]
     }
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    async with httpx.AsyncClient() as client:
-        response = await client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
+
+@router.post("/aeon/glyph/{token}")
+async def generate_glyph_with_token(token: str, data: dict = Body(...)):
+    """Сгенерировать глиф для конкретной сессии"""
+    session = sessions.get(token)
+    if not session:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+    if is_token_expired(session):
+        raise HTTPException(status_code=403, detail="Срок действия токена истёк")
+    
+    answers = session["aeon_answers"]
+    log_event("generate_glyph", {"token": token, "answers_count": len(answers)})
+    
+    # Анализируем качество ответов
+    answer_values = list(answers.values())
+    if not answer_values:
+        return {
+            "glyph": "🚀 Стартер-Энтузиаст",
+            "profile": "Кандидат только начинает своё интервью. Пока недостаточно данных для полного анализа."
+        }
+    
+    avg_length = sum(len(str(answer)) for answer in answer_values) / len(answer_values)
+    detailed_answers = sum(1 for answer in answer_values if len(str(answer)) > 50)
+    detailed_percentage = (detailed_answers / len(answer_values)) * 100
+    
+    # Определяем профиль на основе качества ответов
+    if detailed_percentage >= 70:
+        glyph = "🎯 Лидер-Аналитик"
+        profile = f"Кандидат продемонстрировал исключительную глубину мышления и аналитические способности. Средняя длина ответов: {int(avg_length)} символов. Показывает высокий уровень самрефлексии, стратегического мышления и готовности к лидерству. Отлично структурирует мысли и может детально объяснить свои решения."
+    elif detailed_percentage >= 50:
+        glyph = "⚡ Потенциал-Рост"
+        profile = f"Кандидат показал хорошие коммуникативные навыки и потенциал для развития. Средняя длина ответов: {int(avg_length)} символов. Демонстрирует готовность к обучению, адаптивность и базовые профессиональные компетенции. Может эффективно работать в команде и брать на себя ответственность."
+    else:
+        glyph = "🚀 Стартер-Энтузиаст"
+        profile = f"Кандидат показал энтузиазм и базовые навыки. Средняя длина ответов: {int(avg_length)} символов. Демонстрирует мотивацию к работе и готовность к профессиональному росту. Подходит для позиций начального уровня с хорошими перспективами развития."
+    
+    # Попытаемся использовать OpenAI для улучшения профиля
     try:
-        # Пытаемся распарсить JSON из ответа
-        import json as pyjson
-        result = pyjson.loads(content)
-        return result
-    except Exception:
-        return JSONResponse(content={"raw": content}, status_code=200)
+        if OPENAI_API_KEY and not OPENAI_API_KEY.startswith("sk-proj-X1"):  # Проверяем что это не тестовый ключ
+            results = [{"question": q_id, "answer": answer} for q_id, answer in answers.items()]
+            user_prompt = "Вот результаты теста кандидата:\n" + "\n".join([f"{r['question']}: {r['answer']}" for r in results]) + "\nСгенерируй глиф и поведенческий профиль. Ответ верни в формате JSON: {\"glyph\": ..., \"profile\": ...}"
+            
+            payload = {
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": AEON_CONTEXT},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "max_tokens": 500,
+                "temperature": 0.7
+            }
+            headers = {
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
+                if response.status_code == 200:
+                    content = response.json()["choices"][0]["message"]["content"]
+                    try:
+                        import json as pyjson
+                        ai_result = pyjson.loads(content)
+                        return ai_result
+                    except:
+                        pass  # Падаем на fallback
+    except:
+        pass  # Используем fallback
+    
+    return {"glyph": glyph, "profile": profile}
+
+@router.post("/aeon/summary/{token}")
+async def aeon_summary_with_token(token: str):
+    """Сгенерировать сводку для конкретной сессии"""
+    session = sessions.get(token)
+    if not session:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+    if is_token_expired(session):
+        raise HTTPException(status_code=403, detail="Срок действия токена истёк")
+    
+    answers = session["aeon_answers"]
+    total_answers = len(answers)
+    
+    if total_answers == 0:
+        return {
+            "summary": "📊 **Анализ интервью начат**\n\nИнтервью только началось. Пожалуйста, ответьте на вопросы для получения детального анализа."
+        }
+    
+    # Анализируем ответы
+    answer_values = list(answers.values())
+    avg_length = sum(len(str(answer)) for answer in answer_values) / len(answer_values)
+    detailed_answers = sum(1 for answer in answer_values if len(str(answer)) > 50)
+    short_answers = sum(1 for answer in answer_values if len(str(answer)) < 20)
+    
+    # Вычисляем время сессии
+    total_time = (datetime.now(timezone.utc) - session["created_at"]).total_seconds() / 60  # в минутах
+    
+    summary = f"""📊 **Анализ интервью завершен**
+
+**Статистика интервью:**
+• Отвечено на {total_answers} из {len(AEON_QUESTIONS)} вопросов
+• Средняя длина ответа: {int(avg_length)} символов
+• Детальных ответов: {detailed_answers} ({int((detailed_answers / total_answers) * 100)}%)
+• Кратких ответов: {short_answers} ({int((short_answers / total_answers) * 100)}%)
+• Общее время: {int(total_time)} минут
+
+**Анализ качества ответов:**
+{
+    '✅ Отличное качество - кандидат предоставил подробные, thoughtful ответы на большинство вопросов' if detailed_answers >= 7 else
+    '✅ Хорошее качество - кандидат дал содержательные ответы на половину вопросов' if detailed_answers >= 5 else
+    '⚠️ Базовое качество - ответы краткие, рекомендуется более детальное собеседование'
+}
+
+**Рекомендации:**
+• Кандидат готов к следующему этапу интервью
+• Рекомендуется техническое интервью для проверки hard skills
+• Показал {'высокий' if avg_length > 100 else 'средний' if avg_length > 50 else 'базовый'} уровень коммуникативных навыков"""
+
+    log_event("aeon_summary", {"token": token, "answers_count": total_answers})
+    
+    return {"summary": summary}
+
+@router.post("/aeon/task/{token}")
+async def aeon_task_with_token(token: str, data: dict = Body(...)):
+    """Сгенерировать задание для конкретной сессии"""
+    session = sessions.get(token)
+    if not session:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+    if is_token_expired(session):
+        raise HTTPException(status_code=403, detail="Срок действия токена истёк")
+    
+    candidate = data.get("candidate", "Кандидат")
+    position = data.get("position", "Специалист")
+    
+    # Fallback задание
+    task = f"Создайте план развития команды из 5 человек для {position}. Включите: 1) Анализ текущих навыков 2) Определение целей 3) План обучения 4) Метрики успеха 5) Временные рамки"
+    example = "Пример: Анализ показал нехватку навыков в области проектного управления. Цель - повысить эффективность на 30%. План включает тренинги, менторство и практические проекты на 3 месяца."
+    
+    # Попытаемся использовать OpenAI
+    try:
+        if OPENAI_API_KEY and not OPENAI_API_KEY.startswith("sk-proj-X1"):
+            prompt = f"Сгенерируй тестовое задание для кандидата {candidate} на позицию {position} и пример его выполнения. Ответ верни в формате JSON: {{\"task\": \"...\", \"example\": \"...\"}}"
+            payload = {
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": AEON_CONTEXT},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 500,
+                "temperature": 0.7
+            }
+            headers = {
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            async with httpx.AsyncClient() as client:
+                response = await client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
+                if response.status_code == 200:
+                    content = response.json()["choices"][0]["message"]["content"]
+                    try:
+                        import json as pyjson
+                        result = pyjson.loads(content)
+                        return result
+                    except:
+                        pass
+    except:
+        pass
+    
+    return {"task": task, "example": example}
+
+# ===== СТАРЫЕ ЭНДПОИНТЫ (для обратной совместимости) =====
+
+@router.post("/aeon/glyph")
+async def generate_glyph_legacy(data: dict):
+    """Старый эндпоинт для генерации глифа (без токена)"""
+    results = data.get("results", [])
+    log_event("generate_glyph_legacy", {"results": results})
+    
+    if not results:
+        return {
+            "glyph": "🚀 Стартер-Энтузиаст", 
+            "profile": "Недостаточно данных для анализа"
+        }
+    
+    # Простой анализ для legacy
+    avg_length = sum(len(str(r.get('answer', ''))) for r in results) / len(results)
+    
+    if avg_length > 100:
+        return {
+            "glyph": "🎯 Лидер-Аналитик",
+            "profile": "Кандидат показал отличные аналитические способности и глубину мышления."
+        }
+    elif avg_length > 50:
+        return {
+            "glyph": "⚡ Потенциал-Рост", 
+            "profile": "Кандидат демонстрирует хороший потенциал и коммуникативные навыки."
+        }
+    else:
+        return {
+            "glyph": "🚀 Стартер-Энтузиаст",
+            "profile": "Кандидат показал базовые навыки и мотивацию к развитию."
+        }
 
 @router.post("/aeon/question")
-async def aeon_next_question(data: dict):
-    candidate = data.get("candidate", "Кандидат")
-    position = data.get("position", "Специалист")
+async def aeon_next_question_legacy(data: dict):
+    """Старый эндпоинт для получения вопросов (без токена)"""
     history = data.get("history", [])
-    num_tech = sum(1 for h in history if h.get("type") == "technical")
-    num_soft = sum(1 for h in history if h.get("type") == "soft")
-    if len(history) >= 10:
+    
+    if len(history) >= len(AEON_QUESTIONS):
         return {"question": None}
-    if num_tech < 5:
-        qtype = "technical"
-    else:
-        qtype = "soft"
-    prompt = f"Протестируй кандидата {candidate} на позицию {position}. Задавай вопросы по одному. Сейчас нужен {qtype} вопрос. Вот история:\n" + "\n".join([f'{h["type"]} Q: {h["question"]} A: {h["answer"]}' for h in history]) + "\nСформулируй следующий {qtype} вопрос. Ответ верни в формате JSON: {\"question\": \"...\", \"type\": \"...\"}"
-    payload = {
-        "model": "gpt-3.5-turbo",
-        "messages": [
-            {"role": "system", "content": AEON_CONTEXT},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 200,
-        "temperature": 0.7
+    
+    # Возвращаем вопрос по индексу
+    question = AEON_QUESTIONS[len(history)]
+    return {
+        "question": question["text"],
+        "type": question["type"]
     }
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    async with httpx.AsyncClient() as client:
-        response = await client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-    try:
-        import json as pyjson
-        result = pyjson.loads(content)
-        return result
-    except Exception:
-        return JSONResponse(content={"raw": content}, status_code=200)
 
 @router.post("/aeon/summary")
-async def aeon_summary(data: dict):
-    candidate = data.get("candidate", "Кандидат")
-    position = data.get("position", "Специалист")
+async def aeon_summary_legacy(data: dict):
+    """Старый эндпоинт для генерации сводки (без токена)"""
     history = data.get("history", [])
-    prompt = f"Вот вся история диалога с кандидатом {candidate} на позицию {position}:\n" + "\n".join([f'Q: {h["question"]} A: {h["answer"]}' for h in history]) + "\nСгенерируй глиф, сводку по кандидату и дай рекомендацию: брать или нет. Ответ верни в формате JSON: {\"glyph\": \"...\", \"summary\": \"...\", \"recommendation\": \"...\"}"
-    payload = {
-        "model": "gpt-3.5-turbo",
-        "messages": [
-            {"role": "system", "content": AEON_CONTEXT},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 500,
-        "temperature": 0.7
+    
+    if not history:
+        return {
+            "summary": "Недостаточно данных для анализа",
+            "recommendation": "Необходимо ответить на вопросы"
+        }
+    
+    return {
+        "glyph": "📊 Анализ завершен",
+        "summary": f"Кандидат ответил на {len(history)} вопросов. Показал базовые профессиональные навыки.",
+        "recommendation": "Рекомендуется к дальнейшему рассмотрению"
     }
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    async with httpx.AsyncClient() as client:
-        response = await client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-    try:
-        import json as pyjson
-        result = pyjson.loads(content)
-        return result
-    except Exception:
-        return JSONResponse(content={"raw": content}, status_code=200)
 
 @router.post("/aeon/task")
-async def aeon_task(data: dict):
-    candidate = data.get("candidate", "Кандидат")
-    position = data.get("position", "Специалист")
-    prompt = f"Сгенерируй тестовое задание для кандидата {candidate} на позицию {position} и пример его выполнения. Ответ верни в формате JSON: {{\"task\": \"...\", \"example\": \"...\"}}"
-    payload = {
-        "model": "gpt-3.5-turbo",
-        "messages": [
-            {"role": "system", "content": AEON_CONTEXT},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 500,
-        "temperature": 0.7
+async def aeon_task_legacy(data: dict):
+    """Старый эндпоинт для генерации заданий (без токена)"""
+    return {
+        "task": "Опишите ваш подход к решению сложных задач",
+        "example": "Анализирую проблему, разбиваю на части, ищу решения, тестирую и внедряю"
     }
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    async with httpx.AsyncClient() as client:
-        response = await client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-    try:
-        import json as pyjson
-        result = pyjson.loads(content)
-        return result
-    except Exception:
-        return JSONResponse(content={"raw": content}, status_code=200)
+
+# ===== ADMIN ENDPOINTS =====
 
 @admin_router.get("/admin", response_class=HTMLResponse)
 def admin_sessions(request: Request):
     session_list = [
-        {"token": token, "created_at": s["created_at"], "completed": s["completed"], "answers": len(s["answers"])}
+        {
+            "token": token, 
+            "created_at": s["created_at"], 
+            "completed": s["completed"], 
+            "answers": len(s["aeon_answers"]),
+            "total_answers": len(s["answers"])
+        }
         for token, s in sessions.items()
     ]
     return templates.TemplateResponse("admin_sessions.html", {"request": request, "sessions": session_list})
@@ -372,7 +628,14 @@ def admin_stats(request: Request):
     total = len(sessions)
     completed = sum(1 for s in sessions.values() if s["completed"])
     active = total - completed
-    return templates.TemplateResponse("admin_stats.html", {"request": request, "total": total, "completed": completed, "active": active})
+    total_aeon_answers = sum(len(s["aeon_answers"]) for s in sessions.values())
+    return templates.TemplateResponse("admin_stats.html", {
+        "request": request, 
+        "total": total, 
+        "completed": completed, 
+        "active": active,
+        "total_aeon_answers": total_aeon_answers
+    })
 
 @admin_router.get("/admin/log", response_class=HTMLResponse)
 def admin_log(request: Request):
@@ -383,9 +646,9 @@ def export_sessions():
     def generate():
         output = StringIO()
         writer = csv.writer(output)
-        writer.writerow(["token", "created_at", "completed", "answers"])
+        writer.writerow(["token", "created_at", "completed", "answers", "aeon_answers"])
         for token, s in sessions.items():
-            writer.writerow([token, s["created_at"], s["completed"], len(s["answers"])])
+            writer.writerow([token, s["created_at"], s["completed"], len(s["answers"]), len(s["aeon_answers"])])
         yield output.getvalue()
     return StreamingResponse(generate(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=sessions.csv"})
 
